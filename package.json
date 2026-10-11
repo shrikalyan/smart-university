@@ -1,0 +1,28 @@
+{
+  "name": "smart-university",
+  "private": true,
+  "version": "0.5.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild tests/entry.ts --bundle --platform=node --format=esm --outfile=tests/svc.bundle.mjs --log-level=error && node tests/workflow.mjs",
+    "test:ui": "esbuild src/main.tsx --bundle --format=iife --minify --define:process.env.NODE_ENV='\"production\"' --outfile=tests/app.bundle.js --log-level=error && node tests/ui.mjs",
+    "test:all": "npm run typecheck && npm test && npm run test:ui"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0",
+    "esbuild": "^0.23.0",
+    "jsdom": "^25.0.0"
+  }
+}
