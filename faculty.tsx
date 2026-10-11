@@ -1,0 +1,102 @@
+import { useEffect, useState } from 'react'
+import * as api from '../services'
+import { Async, Badge, Bar, Card, Donut, Empty, FormDialog, PageHeader, Select, Stat, Table, avg, csvOf, download, gradeOf, useAsync, useUI, type Row } from '../ui'
+import { EXAMS, StudentDetail, useAlerts, NotificationsPage } from './shared'
+import { Link } from './link'
+
+const useFac = (me: api.Profile) => useAsync(async () => { const f = await api.getMyFaculty(me.user_code); return { f, subs: ((await api.getSubjects()) as Row[]).filter(s => s.faculty_id === f.id) } })
+/** Per-subject numbers, all derived from the shared store. */
+async function loadStats(subs: Row[]) {
+  const att = (await api.getAttendance()) as Row[]; const out = []
+  for (const s of subs) { const roster = (await api.getSubjectRoster(s.id)) as Row[], marks = (await api.getMarks(undefined, s.id)) as Row[], a = att.filter(x => x.subject_id === s.id); out.push({ s, roster, a, marks, att: avg(a.map(x => x.percentage)), mk: avg(marks.map(m => (m.marks_obtained / m.max_marks) * 100)) }) }
+  return out
+}
+const overallByStudent = (att: Row[]) => { const m = new Map<number, number[]>(); att.forEach(a => m.set(a.student_id, [...(m.get(a.student_id) ?? []), a.percentage])); return new Map([...m].map(([k, v]) => [k, avg(v)])) }
+
+export function FacultyDashboard({ me }: { me: api.Profile }) {
+  const q = useAsync(async () => { const f = await api.getMyFaculty(me.user_code), subs = ((await api.getSubjects()) as Row[]).filter(s => s.faculty_id === f.id); return { f, st: await loadStats(subs), ver: (await api.getVerification()) as Row[] } }), al = useAlerts(me)
+  return <Async q={q}>{({ f, st, ver }) => { const ids = new Set(st.flatMap(x => x.roster.map((e: Row) => e.student_id))), low = st.flatMap(x => x.a.filter((a: Row) => a.percentage < 75).map((a: Row) => ({ ...a, subject: x.s.subject_name, who: x.roster.find((e: Row) => e.student_id === a.student_id)?.students }))), h = new Date().getHours()
+    return <><PageHeader title={`Good ${h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'}, ${f.name}`} sub="Here is your teaching overview." />
+      <Async q={al}>{a => a.length > 0 && <Card>{a.map((x, i) => <div key={i} className={'alert ' + (x.tone === 'bad' ? 'bad' : '')}>{x.t}</div>)}</Card>}</Async>
+      <div className="grid g-stats"><Stat label="Assigned subjects" value={st.length} /><Stat label="Students taught" value={ids.size} /><Stat label="Average attendance" value={st.length ? avg(st.map(x => x.att)) + '%' : '—'} /><Stat label="Verification to review" value={ver.filter(v => ids.has(v.student_id) && v.status !== 'Verified').length} hint="in your subjects" /></div>
+      <h2>My subjects</h2>{st.length === 0 ? <Empty title="No subjects assigned yet" hint="The administrator assigns subjects to faculty." /> : <div className="grid g-3">{st.map(x => <Card key={x.s.id}><div className="muted small">{x.s.subject_code} · Semester {x.s.semester}</div><h3 style={{ margin: '4px 0 10px' }}>{x.s.subject_name}</h3><Bar label={`${x.roster.length} students · attendance`} value={x.att} /><Bar label="Average marks" value={x.mk} /><Link to={`faculty/subjects/${x.s.id}`} className="btn sm">Open subject</Link></Card>)}</div>}
+      <h2>Students below 75% attendance</h2><Table head={['Student', 'Subject', 'Attendance']} rows={low.map(l => [l.who?.name, l.subject, <span key="p" className="err">{l.percentage}%</span>])} empty="No students are below 75%" /></> }}</Async>
+}
+
+export function FacultySubjects({ me, arg }: { me: api.Profile; arg?: string }) {
+  const q = useFac(me), { confirm, run } = useUI(), [pick, setPick] = useState(0)
+  const d = useAsync(async () => { const f = await api.getMyFaculty(me.user_code), s = ((await api.getSubjects()) as Row[]).find(x => x.id === Number(arg) && x.faculty_id === f.id); return s ? { st: (await loadStats([s]))[0], all: (await api.getStudents()) as Row[] } : null }, [arg])
+  if (arg) return <><PageHeader title="Subject" actions={<Link to="faculty/subjects" className="btn">← All subjects</Link>} /><Async q={d}>{x => { if (!x) return <Empty title="Subject not found" hint="It may not be assigned to you." />; const { st, all } = x, ids = new Set(st.roster.map((e: Row) => e.student_id)); return <>
+    <h1 style={{ marginBottom: 14 }}>{st.s.subject_name} <span className="muted" style={{ fontSize: 14 }}>{st.s.subject_code} · Semester {st.s.semester}</span></h1>
+    <div className="grid g-stats"><Stat label="Students" value={st.roster.length} /><Stat label="Average attendance" value={st.roster.length ? st.att + '%' : '—'} /><Stat label="Average marks" value={st.marks.length ? st.mk + '%' : '—'} /></div>
+    <div className="toolbar"><Select label="Enrol a student" value={pick} options={[{ v: 0, l: 'Enrol a student…' }, ...all.filter(s => s.semester === st.s.semester && !ids.has(s.id)).map(s => ({ v: s.id, l: `${s.student_code} ${s.name}` }))]} onChange={v => setPick(+v)} /><button className="btn primary" disabled={!pick} onClick={() => run(() => api.enrollStudent(st.s.id, pick), 'Student enrolled').then(() => setPick(0))}>Enrol</button></div>
+    <Table head={['Student', 'Register', 'Attendance', 'Avg marks', '']} empty="No students are enrolled yet" rows={st.roster.map((e: Row) => { const a = st.a.find((y: Row) => y.student_id === e.student_id), m = st.marks.filter((y: Row) => y.student_id === e.student_id); return [e.students.name, e.students.register_number, a ? <span key="a" className={a.percentage < 75 ? 'err' : ''}>{a.percentage}%</span> : '—', m.length ? avg(m.map((y: Row) => (y.marks_obtained / y.max_marks) * 100)) + '%' : '—', <button key="r" className="btn sm danger" onClick={async () => { if (await confirm({ title: 'Remove from subject?', message: `${e.students.name} will be removed from ${st.s.subject_name}, and their attendance and marks for it will be deleted.`, okLabel: 'Remove', danger: true })) void run(() => api.unenrollStudent(st.s.id, e.student_id), 'Student removed') }}>Remove</button>] })} /></> }}</Async></>
+  return <><PageHeader title="Subjects" sub="Subjects assigned to you." /><Async q={q} empty="No subjects assigned yet">{({ subs }) => subs.length === 0 ? <Empty title="No subjects assigned yet" /> : <SubjectCards subs={subs} />}</Async></>
+}
+function SubjectCards({ subs }: { subs: Row[] }) {
+  const q = useAsync(() => loadStats(subs), [subs.map(s => s.id).join()])
+  return <Async q={q}>{st => <div className="grid g-3">{st.map(x => <Card key={x.s.id}><div className="muted small">{x.s.subject_code} · Semester {x.s.semester}</div><h3 style={{ margin: '4px 0 10px' }}>{x.s.subject_name}</h3><p className="muted">{x.roster.length} students</p><Bar label="Attendance" value={x.att} /><Bar label="Average marks" value={x.mk} /><Link to={`faculty/subjects/${x.s.id}`} className="btn sm">Open</Link></Card>)}</div>}</Async>
+}
+
+export function FacultyStudents({ me }: { me: api.Profile }) {
+  const { toast } = useUI(), [f, setF] = useState({ q: '', dept: '0', sem: '0', att: 'All', scope: 'all' }), [dlg, setDlg] = useState<Row | null>(null)
+  const q = useAsync(async () => { const fac = await api.getMyFaculty(me.user_code), mine = ((await api.getSubjects()) as Row[]).filter(s => s.faculty_id === fac.id), my = new Set<number>(); for (const s of mine) (await api.getSubjectRoster(s.id)).forEach(e => my.add(e.student_id)); return { st: (await api.getStudents()) as Row[], dep: (await api.getDepartments()) as Row[], att: overallByStudent((await api.getAttendance()) as Row[]), my } })
+  return <><PageHeader title="Students" sub="Search students and update the contact details you are permitted to edit." /><Async q={q}>{({ st, dep, att, my }) => {
+    const s = f.q.toLowerCase(), L = st.filter(x => (!s || [x.name, x.student_code, x.register_number].some((y: string) => y.toLowerCase().includes(s))) && (f.dept === '0' || x.department_id === +f.dept) && (f.sem === '0' || x.semester === +f.sem) && (f.scope === 'all' || my.has(x.id)) && (f.att === 'All' || (() => { const a = att.get(x.id); return a !== undefined && (f.att === 'Below 75%' ? a < 75 : f.att === '75–90%' ? a >= 75 && a < 90 : a >= 90) })()))
+    return <><div className="toolbar"><input type="search" aria-label="Search students" placeholder="Search name, ID or register no." value={f.q} onChange={e => setF({ ...f, q: e.target.value })} />
+      <Select label="Department" value={f.dept} options={[{ v: '0', l: 'All departments' }, ...dep.map(d => ({ v: d.id, l: d.code }))]} onChange={v => setF({ ...f, dept: v })} /><Select label="Semester" value={f.sem} options={[{ v: '0', l: 'All semesters' }, ...[1, 2, 3, 4, 5, 6, 7, 8].map(n => ({ v: n, l: 'Semester ' + n }))]} onChange={v => setF({ ...f, sem: v })} />
+      <Select label="Attendance" value={f.att} options={['All', 'Below 75%', '75–90%', '90%+'].map(x => ({ v: x, l: x === 'All' ? 'Any attendance' : x }))} onChange={v => setF({ ...f, att: v })} /><Select label="Scope" value={f.scope} options={[{ v: 'all', l: 'All students' }, { v: 'mine', l: 'My students' }]} onChange={v => setF({ ...f, scope: v })} />
+      <button className="btn" onClick={() => setF({ q: '', dept: '0', sem: '0', att: 'All', scope: 'all' })}>Clear filters</button></div>
+      <p className="muted small">{L.length} of {st.length} students</p>
+      <Table head={['Student', 'Register', 'Dept', 'Sem', 'Attendance', 'CGPA', 'Verification', '']} empty="No students found" rows={L.map(x => { const a = att.get(x.id); return [<span key="n"><b>{x.name}</b><br /><span className="muted small">{x.student_code}</span></span>, x.register_number, x.departments?.code, x.semester, a === undefined ? '—' : <span key="a" className={a < 75 ? 'err' : ''}>{a}%</span>, x.cgpa, <Badge key="v" t={x.verification?.status ?? 'Pending'} />, <span key="b" className="actions"><button className="btn sm" onClick={() => setDlg({ k: 'view', id: x.id })}>View</button><button className="btn sm" onClick={() => setDlg({ k: 'edit', s: x })}>Edit</button></span>] })} /></> }}</Async>
+    {dlg?.k === 'view' && <StudentDetail id={dlg.id} role="faculty" onClose={() => setDlg(null)} />}
+    {dlg?.k === 'edit' && <FormDialog title={`Edit ${dlg.s.student_code}`} initial={dlg.s} fields={[{ key: 'name', label: 'Name' }, { key: 'email', label: 'Email', type: 'email' }, { key: 'phone', label: 'Phone', type: 'tel' }, { key: 'section', label: 'Section', type: 'select', options: ['A', 'B'].map(x => ({ v: x, l: x })) }, { key: 'semester', label: 'Semester', type: 'number' }]} note="Department, CGPA, fees, account status and verification are controlled by the administrator." onClose={() => setDlg(null)} onSubmit={async v => { await api.updateStudent(dlg.s.id, { name: v.name, email: v.email, phone: v.phone, section: v.section, semester: Number(v.semester) }); toast(`Saved ${dlg.s.student_code}`) }} />}</>
+}
+
+function useSubjectPick(me: api.Profile) {
+  const q = useFac(me), [subj, setSubj] = useState(0), cur = (q.data?.subs ?? []).find((s: Row) => s.id === subj) ?? (q.data?.subs ?? [])[0]
+  return { q, cur, subj: cur?.id ?? 0, setSubj }
+}
+export function FacultyAttendance({ me }: { me: api.Profile }) {
+  const { q, cur, subj, setSubj } = useSubjectPick(me), { run } = useUI(), [date, setDate] = useState(new Date().toISOString().slice(0, 10)), [find, setFind] = useState('')
+  const r = useAsync(async () => subj ? { r: (await api.getSubjectRoster(subj)) as Row[], a: (await api.getAttendanceForDate(subj, date)) as Row[], p: (await api.getAttendance()) as Row[] } : null, [subj, date])
+  return <><PageHeader title="Attendance" sub="Mark attendance for a class. Percentages are calculated from these records." /><Async q={q}>{({ subs }) => subs.length === 0 ? <Empty title="No subjects are assigned to you yet" /> : <div className="toolbar">
+    <Select label="Subject" value={subj} options={subs.map((s: Row) => ({ v: s.id, l: `${s.subject_code} — ${s.subject_name}` }))} onChange={v => setSubj(+v)} /><input type="date" aria-label="Date" value={date} onChange={e => setDate(e.target.value)} /><input type="search" aria-label="Search students" placeholder="Search students" value={find} onChange={e => setFind(e.target.value)} /></div>}</Async>
+    {cur && <Async q={r}>{d => { if (!d) return null; if (!d.r.length) return <Empty title="No students are enrolled in this subject" />; const L = d.r.filter(e => !find || (e.students.name + e.students.student_code).toLowerCase().includes(find.toLowerCase())), pres = d.a.filter(x => x.status === 'P').length, abs = d.a.filter(x => x.status === 'A').length; return <>
+      <div className="grid g-stats"><Stat label={`Present (${date})`} value={pres} /><Stat label="Absent" value={abs} /><Stat label="Not marked" value={d.r.length - pres - abs} /></div>
+      <p><button className="btn" onClick={() => run(async () => { for (const e of d.r) await api.updateAttendance(e.student_id, subj, date, 'P') }, 'Everyone marked present')}>Mark all present</button></p>
+      <Table head={['Student', 'Register', `Status on ${date}`, 'Subject attendance']} empty="No students match your search" rows={L.map(e => { const s = d.a.find(x => x.student_id === e.student_id)?.status, pc = d.p.find(x => x.student_id === e.student_id && x.subject_id === subj)?.percentage; return [e.students.name, e.students.register_number, <span key="b" className="actions">{(['P', 'A'] as const).map(v => <button key={v} className={'btn sm' + (s === v ? ' primary' : '')} aria-pressed={s === v} onClick={() => run(() => api.updateAttendance(e.student_id, subj, date, v), 'Attendance saved')}>{v === 'P' ? 'Present' : 'Absent'}</button>)}</span>, pc === undefined ? '—' : <span key="p" className={pc < 75 ? 'err' : ''}>{pc}%</span>] })} /></> }}</Async>}</>
+}
+export function FacultyMarks({ me }: { me: api.Profile }) {
+  const { q, cur, subj, setSubj } = useSubjectPick(me), { toast } = useUI(), [exam, setExam] = useState(EXAMS[0]), [find, setFind] = useState(''), [bump, setBump] = useState(0)
+  const r = useAsync(async () => subj ? { r: (await api.getSubjectRoster(subj)) as Row[], m: (await api.getMarks(undefined, subj)) as Row[] } : null, [subj])
+  return <><PageHeader title="Marks" sub="Enter marks out of 100. Grades are calculated automatically." /><Async q={q}>{({ subs }) => subs.length === 0 ? <Empty title="No subjects are assigned to you yet" /> : <div className="toolbar">
+    <Select label="Subject" value={subj} options={subs.map((s: Row) => ({ v: s.id, l: `${s.subject_code} — ${s.subject_name}` }))} onChange={v => setSubj(+v)} /><Select label="Assessment" value={exam} options={EXAMS.map(e => ({ v: e, l: e }))} onChange={setExam} /><input type="search" aria-label="Search students" placeholder="Search students" value={find} onChange={e => setFind(e.target.value)} /></div>}</Async>
+    {cur && <Async q={r}>{d => { if (!d) return null; if (!d.r.length) return <Empty title="No students are enrolled in this subject" />; const L = d.r.filter(e => !find || (e.students.name + e.students.student_code).toLowerCase().includes(find.toLowerCase()))
+      return <Table head={['Student', 'Register', `${exam} (out of 100)`, 'Grade']} empty="No students match your search" rows={L.map(e => { const m = d.m.find(x => x.student_id === e.student_id && x.exam_type === exam); return [e.students.name, e.students.register_number,
+        <input key={e.student_id + exam + bump + (m?.marks_obtained ?? '')} type="number" min={0} max={100} defaultValue={m?.marks_obtained} aria-label={`Marks for ${e.students.name}`} style={{ width: 90 }} onBlur={async ev => { const val = ev.target.value; if (val === '' || Number(val) === m?.marks_obtained) return; try { await api.updateMarks(e.student_id, subj, exam, Number(val)); toast('Marks saved') } catch (x) { toast((x as Error).message, 'err'); setBump(b => b + 1) } }} />, m ? <Badge key="g" t={m.grade} /> : '—'] })} /> }}</Async>}</>
+}
+
+export function VerificationPage({ role }: { role: api.Role }) {
+  const { run } = useUI(), q = useAsync(async () => (await api.getVerification()) as Row[]), [f, setF] = useState({ s: 'All', q: '' }), [view, setView] = useState(0)
+  const S = ['Verified', 'Pending', 'Needs Review', 'Rejected']
+  return <><PageHeader title="Verification" sub={role === 'admin' ? 'University-wide verification status.' : 'Review and update verification status for students.'} /><Async q={q}>{rows => { const L = rows.filter(v => (f.s === 'All' || v.status === f.s) && (!f.q || (v.students?.name + v.students?.student_code + v.students?.register_number).toLowerCase().includes(f.q.toLowerCase())))
+    return <><div className="grid g-stats">{S.map(s => <Stat key={s} label={s} value={rows.filter(v => v.status === s).length} />)}</div>
+      <div className="toolbar"><input type="search" aria-label="Search students" placeholder="Search students" value={f.q} onChange={e => setF({ ...f, q: e.target.value })} /><Select label="Status filter" value={f.s} options={['All', ...S].map(x => ({ v: x, l: x === 'All' ? 'All statuses' : x }))} onChange={v => setF({ ...f, s: v })} /></div>
+      <Table head={['Student', 'Register', 'Updated', 'Status']} empty="No matching records" rows={L.map(v => [<button key="n" className="btn sm" onClick={() => setView(v.student_id)}>{v.students?.name}</button>, v.students?.register_number, v.date, <Select key="s" label={`Verification for ${v.students?.name}`} value={v.status} options={S.map(x => ({ v: x, l: x }))} onChange={x => run(() => api.updateVerification(v.student_id, x), 'Verification updated')} />])} />
+      {view > 0 && <StudentDetail id={view} role={role} onClose={() => setView(0)} />}</> }}</Async></>
+}
+
+export function FacultyReports({ me }: { me: api.Profile }) {
+  const q = useAsync(async () => { const f = await api.getMyFaculty(me.user_code), subs = ((await api.getSubjects()) as Row[]).filter(s => s.faculty_id === f.id); return { st: await loadStats(subs) } })
+  return <><PageHeader title="Reports" sub="Class performance across your subjects." /><Async q={q}>{({ st }) => { if (!st.length) return <Empty title="No subjects assigned yet" />; const rows = st.flatMap(x => x.roster.map((e: Row) => { const a = x.a.find((y: Row) => y.student_id === e.student_id)?.percentage, ms = x.marks.filter((m: Row) => m.student_id === e.student_id).map((m: Row) => (m.marks_obtained / m.max_marks) * 100); return { who: e.students, sub: x.s.subject_name, a, m: ms.length ? avg(ms) : undefined } }))
+    const per = new Map<number, { who: Row; a: number[]; m: number[] }>(); rows.forEach(r => { const c = per.get(r.who.id) ?? { who: r.who, a: [], m: [] }; if (r.a !== undefined) c.a.push(r.a); if (r.m !== undefined) c.m.push(r.m); per.set(r.who.id, c) })
+    const P = [...per.values()].map(p => ({ ...p, aa: avg(p.a), mm: avg(p.m) })), tier = (p: { aa: number; mm: number }) => p.aa < 75 || p.mm < 60 ? 2 : p.mm >= 85 && p.aa >= 85 ? 0 : 1, dist = [0, 1, 2].map(t => P.filter(p => tier(p) === t).length), low = rows.filter(r => r.a !== undefined && r.a < 75)
+    return <><div className="grid g-stats"><Stat label="Class average attendance" value={avg(st.map(x => x.att)) + '%'} /><Stat label="Class average marks" value={avg(st.map(x => x.mk)) + '%'} /><Stat label="Students" value={P.length} /><Stat label="Below 75% attendance" value={low.length} /></div>
+      <div className="grid g-2"><Card title="Attendance by subject">{st.map(x => <Bar key={x.s.id} label={x.s.subject_name} value={x.att} warn={x.att < 75} />)}</Card><Card title="Average marks by subject">{st.map(x => <Bar key={x.s.id} label={x.s.subject_name} value={x.mk} />)}</Card>
+        <Card title="Student distribution">{['Excellent', 'Good', 'Needs attention'].map((l, i) => <Bar key={l} label={l} value={dist[i]} max={Math.max(P.length, 1)} text={String(dist[i])} warn={i === 2} />)}</Card><Card title="Top performing students"><ul className="list">{[...P].sort((a, b) => b.mm - a.mm).slice(0, 5).map(p => <li key={p.who.id}><span>{p.who.name}</span><b>{p.mm}%</b></li>)}</ul></Card></div>
+      <h2>Attendance alerts</h2><Table head={['Student', 'Subject', 'Attendance']} rows={low.map(l => [l.who.name, l.sub, <span key="a" className="err">{l.a}%</span>])} empty="No students are below 75%" />
+      <p><button className="btn" onClick={() => download('class-report.csv', csvOf([['Student', 'Subject', 'Attendance %', 'Average marks %'], ...rows.map(r => [r.who.name, r.sub, r.a ?? '', r.m ?? ''])]))}>Export CSV</button></p></> }}</Async></>
+}
+export const FacultyNotifications = NotificationsPage
+void useEffect; void gradeOf; void Donut
